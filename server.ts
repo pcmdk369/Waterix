@@ -19,6 +19,8 @@ import {
   processImageTextWatermark,
   processImageLogoWatermark,
   processVideoWatermark,
+  renderTextWatermarkBadge,
+  renderLogoWatermarkBadge,
 } from './server/watermarkProcessor';
 
 const app = express();
@@ -37,23 +39,23 @@ if (!fs.existsSync(UPLOAD_TEMP_DIR)) {
 const upload = multer({
   dest: UPLOAD_TEMP_DIR,
   limits: {
-    fileSize: 30 * 1024 * 1024, // 30MB limit
+    fileSize: 35 * 1024 * 1024, // 35MB limit
   },
   fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
+    const ext = path.extname(file.originalname || '').toLowerCase();
     const mime = (file.mimetype || '').toLowerCase();
 
-    const imageExts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff', '.tif', '.avif', '.heic', '.heif'];
-    const videoExts = ['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v', '.3gp'];
+    const imageExts = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff', '.tif', '.avif', '.heic', '.heif', '.svg', '.ico'];
+    const videoExts = ['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v', '.3gp', '.flv', '.wmv', '.ogv', '.ts'];
 
     const isImage = mime.startsWith('image/') || imageExts.includes(ext);
     const isVideo = mime.startsWith('video/') || videoExts.includes(ext);
 
-    // Accept if mime is valid image/video, or recognized extension, or clipboard blob without extension
-    if (isImage || isVideo || (!ext && (!mime || mime === 'application/octet-stream'))) {
+    // Accept if mime is valid image/video, recognized extension, or clipboard blob without extension/generic mime
+    if (isImage || isVideo || !ext || !mime || mime === 'application/octet-stream' || mime === 'binary/octet-stream') {
       cb(null, true);
     } else {
-      cb(new Error(`Unsupported file type: ${ext || mime}. Please upload an image (JPG, PNG, WebP, GIF, HEIC) or video (MP4, MOV, WebM).`));
+      cb(new Error(`Unsupported file format (${ext || mime}). Please upload an image or video file.`));
     }
   },
 });
@@ -350,22 +352,27 @@ app.post(['/api/watermark/text'], async (req, res) => {
     const processedPath = path.join(jobDir, 'processed.mp4');
     (async () => {
       try {
-        // Render text overlay image with exact width/height matching video
+        // Render text overlay image
         const vMeta = await getVideoMetadata(job.originalPath);
         const overlayImgPath = path.join(jobDir, 'overlay_temp.png');
-        // Generate transparent blank canvas buffer
-        const blankCanvas = await sharp({
-          create: {
-            width: vMeta.width || 1280,
-            height: vMeta.height || 720,
-            channels: 4,
-            background: { r: 0, g: 0, b: 0, alpha: 0 },
-          },
-        })
-          .png()
-          .toBuffer();
+        const isRepeat = !!wmOptions.repeat;
 
-        await processImageTextWatermark(blankCanvas, overlayImgPath, wmOptions);
+        if (isRepeat) {
+          const blankCanvas = await sharp({
+            create: {
+              width: vMeta.width || 1280,
+              height: vMeta.height || 720,
+              channels: 4,
+              background: { r: 0, g: 0, b: 0, alpha: 0 },
+            },
+          })
+            .png()
+            .toBuffer();
+          await processImageTextWatermark(blankCanvas, overlayImgPath, wmOptions);
+        } else {
+          const badgeBuffer = await renderTextWatermarkBadge(wmOptions, vMeta.width || 1280);
+          await fs.promises.writeFile(overlayImgPath, badgeBuffer);
+        }
 
         await processVideoWatermark(job.originalPath, processedPath, overlayImgPath, {
           startTime: wmOptions.startTime,
@@ -374,6 +381,8 @@ app.post(['/api/watermark/text'], async (req, res) => {
           position: wmOptions.position,
           customX: wmOptions.customX,
           customY: wmOptions.customY,
+          margin: wmOptions.margin,
+          isFullFrame: isRepeat,
         }, (progress, stage) => {
           updateJob(jobId, { progress, stage });
         });
@@ -457,18 +466,24 @@ app.post(['/api/watermark/image', '/api/watermark/logo'], async (req, res) => {
         try {
           const vMeta = await getVideoMetadata(job.originalPath);
           const overlayImgPath = path.join(jobDir, 'overlay_logo_temp.png');
-          const blankCanvas = await sharp({
-            create: {
-              width: vMeta.width || 1280,
-              height: vMeta.height || 720,
-              channels: 4,
-              background: { r: 0, g: 0, b: 0, alpha: 0 },
-            },
-          })
-            .png()
-            .toBuffer();
+          const isRepeat = !!wmOptions.repeat;
 
-          await processImageLogoWatermark(blankCanvas, overlayImgPath, logoBuffer, wmOptions);
+          if (isRepeat) {
+            const blankCanvas = await sharp({
+              create: {
+                width: vMeta.width || 1280,
+                height: vMeta.height || 720,
+                channels: 4,
+                background: { r: 0, g: 0, b: 0, alpha: 0 },
+              },
+            })
+              .png()
+              .toBuffer();
+            await processImageLogoWatermark(blankCanvas, overlayImgPath, logoBuffer, wmOptions);
+          } else {
+            const badgeBuffer = await renderLogoWatermarkBadge(logoBuffer, wmOptions, vMeta.width || 1280);
+            await fs.promises.writeFile(overlayImgPath, badgeBuffer);
+          }
 
           await processVideoWatermark(job.originalPath, processedPath, overlayImgPath, {
             startTime: wmOptions.startTime,
@@ -477,6 +492,8 @@ app.post(['/api/watermark/image', '/api/watermark/logo'], async (req, res) => {
             position: wmOptions.position,
             customX: wmOptions.customX,
             customY: wmOptions.customY,
+            margin: wmOptions.margin,
+            isFullFrame: isRepeat,
           }, (progress, stage) => {
             updateJob(jobId, { progress, stage });
           });
@@ -548,15 +565,28 @@ app.post('/api/watermark/video', async (req, res) => {
         .png()
         .toBuffer();
 
+      const isRepeat = !!wmOptions.repeat;
+
       if (logoDataUrl) {
         const base64Data = logoDataUrl.replace(/^data:image\/\w+;base64,/, '');
         const logoBuffer = Buffer.from(base64Data, 'base64');
-        await processImageLogoWatermark(blankCanvas, overlayImgPath, logoBuffer, wmOptions);
+        if (isRepeat) {
+          await processImageLogoWatermark(blankCanvas, overlayImgPath, logoBuffer, wmOptions);
+        } else {
+          const badgeBuffer = await renderLogoWatermarkBadge(logoBuffer, wmOptions, vMeta.width || 1280);
+          await fs.promises.writeFile(overlayImgPath, badgeBuffer);
+        }
       } else {
-        await processImageTextWatermark(blankCanvas, overlayImgPath, {
+        const textOptions = {
           text: text || options?.text || 'WATERIX',
           ...wmOptions,
-        });
+        };
+        if (isRepeat) {
+          await processImageTextWatermark(blankCanvas, overlayImgPath, textOptions);
+        } else {
+          const badgeBuffer = await renderTextWatermarkBadge(textOptions, vMeta.width || 1280);
+          await fs.promises.writeFile(overlayImgPath, badgeBuffer);
+        }
       }
 
       await processVideoWatermark(
@@ -570,6 +600,8 @@ app.post('/api/watermark/video', async (req, res) => {
           position: wmOptions.position,
           customX: wmOptions.customX,
           customY: wmOptions.customY,
+          margin: wmOptions.margin,
+          isFullFrame: isRepeat,
         },
         (progress: number, stage: any) => {
           updateJob(jobId, { progress, stage });

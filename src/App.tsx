@@ -69,18 +69,40 @@ export default function App() {
         setUploadProgress((prev) => (prev < 80 ? prev + 12 : prev));
       }, 150);
 
-      const postUpload = () =>
-        fetch('/api/upload', {
-          method: 'POST',
-          body: formData,
-        });
+      const postUpload = async () => {
+        try {
+          return await fetch('/api/upload', {
+            method: 'POST',
+            body: formData,
+          });
+        } catch (fetchErr) {
+          // If first attempt network error (e.g. server starting or proxy delay), wait 1s and retry once
+          await new Promise((r) => setTimeout(r, 1000));
+          return await fetch('/api/upload', {
+            method: 'POST',
+            body: formData,
+          });
+        }
+      };
 
-      let response = await postUpload();
+      let response: Response;
+      try {
+        response = await postUpload();
+      } catch (networkErr: any) {
+        throw new Error('Could not connect to the processing server. Please verify your connection and try again.');
+      }
 
       // If backend was warming up or 502/503/504, auto-retry once after 1.2s
       if (response.status === 502 || response.status === 503 || response.status === 504) {
         await new Promise((r) => setTimeout(r, 1200));
-        response = await postUpload();
+        try {
+          response = await fetch('/api/upload', {
+            method: 'POST',
+            body: formData,
+          });
+        } catch (retryErr) {
+          // ignore retry fetch error, handled below
+        }
       }
 
       clearInterval(progressTimer);
@@ -91,13 +113,23 @@ export default function App() {
 
       if (contentType.includes('application/json')) {
         data = await response.json().catch(() => null);
+      } else {
+        const textContent = await response.text().catch(() => '');
+        try {
+          data = JSON.parse(textContent);
+        } catch {
+          // Non-JSON response received (HTML error page or proxy error)
+          if (!response.ok) {
+            throw new Error(`Server returned error (${response.status}). Please try uploading again.`);
+          }
+        }
       }
 
       if (!response.ok) {
         let msg = data?.error;
         if (!msg) {
           if (response.status === 413) {
-            msg = 'File size is too large (25MB limit).';
+            msg = 'File size is too large (30MB limit).';
           } else if (response.status === 502 || response.status === 503 || response.status === 504) {
             msg = 'Processing server is warming up. Please try uploading again in a few seconds.';
           } else {
@@ -108,7 +140,7 @@ export default function App() {
       }
 
       if (!data || !data.jobId) {
-        throw new Error('Unexpected response format from server. Please try again.');
+        throw new Error('Server returned an empty or invalid response. Please try uploading the file again.');
       }
 
       setActiveJob({

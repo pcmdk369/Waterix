@@ -112,6 +112,118 @@ async function savePipelineToFile(pipeline: ReturnType<typeof sharp>, outputPath
   await fs.promises.writeFile(outputPath, buffer);
 }
 
+// Render transparent badge buffer for text watermark
+export async function renderTextWatermarkBadge(
+  options: TextWatermarkOptions,
+  baseWidth?: number
+): Promise<Buffer> {
+  const width = baseWidth || 1200;
+  const text = escapeXml(options.text || 'WATERIX');
+  const fontSize = options.fontSize || Math.max(20, Math.round(width * 0.04));
+  const fill = options.color || '#ffffff';
+  const opacity = options.opacity !== undefined ? options.opacity : 0.8;
+  const fontWeight = options.isBold ? 'bold' : 'normal';
+  const fontStyle = options.isItalic ? 'italic' : 'normal';
+  const fontFamily = options.fontFamily || 'Inter, -apple-system, sans-serif';
+  const letterSpacing = options.letterSpacing ? `${options.letterSpacing}px` : '0px';
+  const rotation = options.rotation || 0;
+
+  const outlineStyle = options.outline
+    ? `stroke="${options.outlineColor || '#000000'}" stroke-width="2" paint-order="stroke fill"`
+    : '';
+  const filterShadow = options.shadow
+    ? `<filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="2" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.8" />
+       </filter>`
+    : '';
+  const filterAttr = options.shadow ? 'filter="url(#shadow)"' : '';
+
+  const approxTextWidth = Math.max(60, text.length * fontSize * 0.75 + 40);
+  const approxTextHeight = fontSize * 1.6 + 24;
+
+  const bgBox = options.background
+    ? `<rect x="0" y="0" width="100%" height="100%" rx="8" fill="${options.backgroundColor || '#000000'}" fill-opacity="${Math.min(0.85, opacity + 0.1)}" />`
+    : '';
+
+  const badgeSvg = `
+    <svg width="${approxTextWidth}" height="${approxTextHeight}" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        ${filterShadow}
+      </defs>
+      ${bgBox}
+      <text x="50%" y="50%"
+        font-family="${fontFamily}"
+        font-size="${fontSize}"
+        font-weight="${fontWeight}"
+        font-style="${fontStyle}"
+        letter-spacing="${letterSpacing}"
+        fill="${fill}"
+        fill-opacity="${opacity}"
+        text-anchor="middle"
+        dominant-baseline="central"
+        ${outlineStyle}
+        ${filterAttr}>
+        ${text}
+      </text>
+    </svg>
+  `;
+
+  let renderedBadge = await sharp(Buffer.from(badgeSvg))
+    .png()
+    .toBuffer();
+
+  if (rotation !== 0) {
+    renderedBadge = await sharp(renderedBadge)
+      .rotate(rotation, { background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .toBuffer();
+  }
+
+  return renderedBadge;
+}
+
+// Render transparent badge buffer for logo watermark
+export async function renderLogoWatermarkBadge(
+  logoBuffer: Buffer,
+  options: ImageWatermarkOptions,
+  baseWidth?: number
+): Promise<Buffer> {
+  const width = baseWidth || 1200;
+  const scalePct = Math.min(100, Math.max(5, options.scale || 20)) / 100;
+  const targetLogoWidth = Math.round(width * scalePct);
+
+  let processedLogo = sharp(logoBuffer)
+    .resize({ width: targetLogoWidth, fit: 'inside' })
+    .ensureAlpha();
+
+  const opacity = options.opacity !== undefined ? Math.max(0.05, Math.min(1, options.opacity)) : 0.8;
+
+  if (options.rotation && options.rotation !== 0) {
+    processedLogo = processedLogo.rotate(options.rotation, { background: { r: 0, g: 0, b: 0, alpha: 0 } });
+  }
+
+  const logoRaw = await processedLogo.toBuffer();
+  const { data: logoPixels, info: logoInfo } = await sharp(logoRaw)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const logoCh = logoInfo.channels;
+  for (let i = 0; i < logoPixels.length; i += logoCh) {
+    if (logoCh >= 4) {
+      logoPixels[i + 3] = Math.round(logoPixels[i + 3] * opacity);
+    }
+  }
+
+  return sharp(logoPixels, {
+    raw: {
+      width: logoInfo.width,
+      height: logoInfo.height,
+      channels: logoCh,
+    },
+  })
+    .png()
+    .toBuffer();
+}
+
 // 1. Process Text Watermark on Image
 export async function processImageTextWatermark(
   imageInput: string | Buffer,
@@ -181,51 +293,10 @@ export async function processImageTextWatermark(
     await savePipelineToFile(pipeline, outputPath);
   } else {
     // Single placement watermark
-    // Render text with padding inside an SVG bounding box
-    const approxTextWidth = Math.max(60, text.length * fontSize * 0.7 + 40);
-    const approxTextHeight = fontSize * 1.6 + 20;
-
-    const bgBox = options.background
-      ? `<rect x="0" y="0" width="100%" height="100%" rx="8" fill="${options.backgroundColor || '#000000'}" fill-opacity="${Math.min(0.85, opacity + 0.1)}" />`
-      : '';
-
-    const badgeSvg = `
-      <svg width="${approxTextWidth}" height="${approxTextHeight}" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          ${filterShadow}
-        </defs>
-        ${bgBox}
-        <text x="50%" y="50%"
-          font-family="${fontFamily}"
-          font-size="${fontSize}"
-          font-weight="${fontWeight}"
-          font-style="${fontStyle}"
-          letter-spacing="${letterSpacing}"
-          fill="${fill}"
-          fill-opacity="${opacity}"
-          text-anchor="middle"
-          dominant-baseline="central"
-          ${outlineStyle}
-          ${filterAttr}>
-          ${text}
-        </text>
-      </svg>
-    `;
-
-    // Apply rotation if requested
-    let renderedBadge = await sharp(Buffer.from(badgeSvg))
-      .png()
-      .toBuffer();
-
-    if (rotation !== 0) {
-      renderedBadge = await sharp(renderedBadge)
-        .rotate(rotation, { background: { r: 0, g: 0, b: 0, alpha: 0 } })
-        .toBuffer();
-    }
-
+    const renderedBadge = await renderTextWatermarkBadge(options, width);
     const badgeMeta = await sharp(renderedBadge).metadata();
-    const bW = badgeMeta.width || approxTextWidth;
-    const bH = badgeMeta.height || approxTextHeight;
+    const bW = badgeMeta.width || 200;
+    const bH = badgeMeta.height || 60;
 
     const { x, y } = calculatePosition(
       options.position,
@@ -269,45 +340,10 @@ export async function processImageLogoWatermark(
 
   onProgress?.(50, 'AI Restoration');
 
-  // Determine logo target dimensions based on scale percentage (default 20% of image width)
-  const scalePct = Math.min(100, Math.max(5, options.scale || 20)) / 100;
-  const targetLogoWidth = Math.round(width * scalePct);
-
-  let processedLogo = sharp(logoBuffer)
-    .resize({ width: targetLogoWidth, fit: 'inside' })
-    .ensureAlpha();
-
-  // Opacity modulation
-  const opacity = options.opacity !== undefined ? Math.max(0.05, Math.min(1, options.opacity)) : 0.8;
-
-  // Apply rotation if needed
-  if (options.rotation && options.rotation !== 0) {
-    processedLogo = processedLogo.rotate(options.rotation, { background: { r: 0, g: 0, b: 0, alpha: 0 } });
-  }
-
-  const logoRaw = await processedLogo.toBuffer();
-  // Adjust alpha channel by opacity
-  const { data: logoPixels, info: logoInfo } = await sharp(logoRaw)
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  const logoCh = logoInfo.channels;
-  for (let i = 0; i < logoPixels.length; i += logoCh) {
-    if (logoCh >= 4) {
-      logoPixels[i + 3] = Math.round(logoPixels[i + 3] * opacity);
-    }
-  }
-
-  const finalLogo = await sharp(logoPixels, {
-    raw: {
-      width: logoInfo.width,
-      height: logoInfo.height,
-      channels: logoCh,
-    },
-  }).png().toBuffer();
-
-  const logoW = logoInfo.width;
-  const logoH = logoInfo.height;
+  const finalLogo = await renderLogoWatermarkBadge(logoBuffer, options, width);
+  const logoMeta = await sharp(finalLogo).metadata();
+  const logoW = logoMeta.width || 200;
+  const logoH = logoMeta.height || 200;
   const margin = options.margin !== undefined ? options.margin : 24;
 
   if (options.repeat) {
@@ -358,7 +394,7 @@ export async function processImageLogoWatermark(
 export async function processVideoWatermark(
   inputPath: string,
   outputPath: string,
-  overlayImagePath: string, // Prepared transparent PNG overlay with correct positioning & opacity
+  overlayImagePath: string,
   options: {
     startTime?: number;
     endTime?: number;
@@ -367,36 +403,99 @@ export async function processVideoWatermark(
     position?: string;
     customX?: number;
     customY?: number;
+    margin?: number;
+    isFullFrame?: boolean;
   },
   onProgress?: (progress: number, stage: any) => void
 ): Promise<void> {
   onProgress?.(15, 'Preparing');
 
   const videoMeta = await getVideoMetadata(inputPath);
-  const totalDuration = videoMeta.duration || 10;
-  const width = videoMeta.width || 1280;
-  const height = videoMeta.height || 720;
+  const totalDuration = Math.max(1, videoMeta.duration || 10);
 
-  const startSec = Math.max(0, options.startTime || 0);
-  const endSec = options.endTime && options.endTime > startSec ? Math.min(totalDuration, options.endTime) : totalDuration;
+  const startSec = Number.isFinite(options.startTime) ? Math.max(0, options.startTime!) : 0;
+  const endSec = Number.isFinite(options.endTime) && options.endTime! > startSec
+    ? Math.min(totalDuration, options.endTime!)
+    : totalDuration;
 
-  // FFmpeg overlay filter with enable timeline expressions and optional movement
-  let overlayX = '0';
-  let overlayY = '0';
+  let overlayX: string;
+  let overlayY: string;
 
-  if (options.movement === 'left-to-right') {
-    overlayX = `mod(t*120, main_w)`;
-    overlayY = `main_h*0.8`;
-  } else if (options.movement === 'top-to-bottom') {
-    overlayX = `main_w*0.8`;
-    overlayY = `mod(t*80, main_h)`;
-  } else if (options.movement === 'bounce') {
-    overlayX = `abs(mod(t*100, main_w*2 - overlay_w) - (main_w - overlay_w))`;
-    overlayY = `abs(mod(t*60, main_h*2 - overlay_h) - (main_h - overlay_h))`;
+  if (options.isFullFrame) {
+    overlayX = '0';
+    overlayY = '0';
+  } else {
+    const margin = options.margin !== undefined ? Math.max(0, options.margin) : 24;
+    let baseX = `main_w-overlay_w-${margin}`;
+    let baseY = `main_h-overlay_h-${margin}`;
+
+    switch (options.position) {
+      case 'top-left':
+        baseX = `${margin}`;
+        baseY = `${margin}`;
+        break;
+      case 'top-center':
+        baseX = `(main_w-overlay_w)/2`;
+        baseY = `${margin}`;
+        break;
+      case 'top-right':
+        baseX = `main_w-overlay_w-${margin}`;
+        baseY = `${margin}`;
+        break;
+      case 'center-left':
+        baseX = `${margin}`;
+        baseY = `(main_h-overlay_h)/2`;
+        break;
+      case 'center':
+        baseX = `(main_w-overlay_w)/2`;
+        baseY = `(main_h-overlay_h)/2`;
+        break;
+      case 'center-right':
+        baseX = `main_w-overlay_w-${margin}`;
+        baseY = `(main_h-overlay_h)/2`;
+        break;
+      case 'bottom-left':
+        baseX = `${margin}`;
+        baseY = `main_h-overlay_h-${margin}`;
+        break;
+      case 'bottom-center':
+        baseX = `(main_w-overlay_w)/2`;
+        baseY = `main_h-overlay_h-${margin}`;
+        break;
+      case 'bottom-right':
+        baseX = `main_w-overlay_w-${margin}`;
+        baseY = `main_h-overlay_h-${margin}`;
+        break;
+      case 'custom': {
+        const px = Math.max(0, Math.min(100, options.customX ?? 50)) / 100;
+        const py = Math.max(0, Math.min(100, options.customY ?? 50)) / 100;
+        baseX = `(main_w-overlay_w)*${px.toFixed(4)}`;
+        baseY = `(main_h-overlay_h)*${py.toFixed(4)}`;
+        break;
+      }
+      default:
+        baseX = `main_w-overlay_w-${margin}`;
+        baseY = `main_h-overlay_h-${margin}`;
+        break;
+    }
+
+    if (options.movement === 'left-to-right') {
+      overlayX = `mod(t*120,main_w+overlay_w)-overlay_w`;
+      overlayY = baseY;
+    } else if (options.movement === 'top-to-bottom') {
+      overlayX = baseX;
+      overlayY = `mod(t*80,main_h+overlay_h)-overlay_h`;
+    } else if (options.movement === 'bounce') {
+      overlayX = `abs(mod(t*100,(main_w-overlay_w)*2)-(main_w-overlay_w))`;
+      overlayY = `abs(mod(t*60,(main_h-overlay_h)*2)-(main_h-overlay_h))`;
+    } else {
+      overlayX = baseX;
+      overlayY = baseY;
+    }
   }
 
-  const enableExpr = `between(t,${startSec},${endSec})`;
-  const filterComplex = `[0:v][1:v]overlay=${overlayX}:${overlayY}:enable='${enableExpr}'[v]`;
+  const enableExpr = `between(t,${startSec.toFixed(2)},${endSec.toFixed(2)})`;
+  const filterComplex = `[0:v][1:v]overlay=x='${overlayX}':y='${overlayY}':enable='${enableExpr}'[ov];[ov]scale=trunc(iw/2)*2:trunc(ih/2)*2[v]`;
 
   onProgress?.(45, 'AI Restoration');
 
