@@ -1,0 +1,6 @@
+{
+  "name": "WATERIX™ - AI Watermark Removal & Media Cleanup",
+  "description": "Remove unwanted overlays and clean up authorized media anonymously. Real-time watermark removal for images and videos with instant before/after preview and download.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
