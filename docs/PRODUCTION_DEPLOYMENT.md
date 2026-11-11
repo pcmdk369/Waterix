@@ -16,7 +16,7 @@ Build and run locally:
 
 ```bash
 docker build -t waterix:local .
-docker run --rm -p 3000:3000 -e PORT=3000 waterix:local
+docker run --rm -p 3000:3000 waterix:local
 ```
 
 Open `http://localhost:3000`. Verify `GET /api/health` before testing uploads.
@@ -25,7 +25,7 @@ Open `http://localhost:3000`. Verify `GET /api/health` before testing uploads.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `PORT` | No | Container listen port; current application listener is 3000 |
+| `PORT` | No | Not currently read by the application; the listener is fixed to port 3000 |
 | `GEMINI_API_KEY` | For Gemini-backed restoration | Server-side AI provider credential |
 | `APP_URL` | Deployment-specific | Public application URL where used by the app |
 
