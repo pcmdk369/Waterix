@@ -49,3 +49,6 @@ jobs:
         run: bun run build
         env:
           NODE_ENV: production
+
+      - name: Build production container
+        run: docker build --tag waterix:ci .
