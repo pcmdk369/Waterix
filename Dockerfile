@@ -8,6 +8,7 @@ RUN bun install --frozen-lockfile
 
 COPY . .
 RUN bun run lint && bun run build
+RUN bun install --frozen-lockfile --production
 
 FROM oven/bun:1-debian AS runtime
 ENV NODE_ENV=production
